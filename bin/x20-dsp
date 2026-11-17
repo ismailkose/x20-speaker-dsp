@@ -8,6 +8,10 @@ PRESETS="$DATA/presets"
 STATE="$DATA/active"
 CONF="$HOME/.config/pipewire/pipewire.conf.d/90-x20-dsp.conf"
 NODE="effect_input.x20_dsp"
+# Speaker profile: SteamOS 3.10's alsa-ucm-conf lacks the TAS2783 speaker profile.
+UCM_SYS=/usr/share/alsa/ucm2
+UCM_OVL="$DATA/ucm2"
+UCM_ENV="$HOME/.config/environment.d/90-x20-speaker-ucm.conf"
 
 usage() {
   cat <<EOF
@@ -19,11 +23,37 @@ usage: x20-dsp <command>
   list            list presets (* = selected)
   status          show state
   doctor          check the installation
+  speaker-profile refresh the speaker profile (runs automatically at login)
 EOF
 }
 current() { cat "$STATE" 2>/dev/null || echo xtc; }
 restart() { systemctl --user restart pipewire pipewire-pulse wireplumber; sleep 2; }
 loaded()  { pw-cli ls Node 2>/dev/null | grep -q "$NODE"; }
+
+# Kernel side of the speakers: the SoundWire card reports both TAS2783 amps.
+speaker_driver_ok() {
+  local id n
+  for id in /proc/asound/card*/id; do
+    [ "$(cat "$id")" = amdsoundwire ] || continue
+    n="$(basename "$(dirname "$id")")"; n="${n#card}"
+    amixer -c "$n" info 2>/dev/null | grep -q 'spk:tas2783' && return 0
+  done
+  return 1
+}
+
+# Rebuild the overlay: symlinks to every system UCM file (so SteamOS updates still apply)
+# plus tas2783.conf, only while SteamOS doesn't ship it itself.
+speaker_profile() {
+  local tmp="$UCM_OVL.new" f
+  [ -d "$UCM_SYS/sof-soundwire" ] || { echo "no $UCM_SYS/sof-soundwire"; return 1; }
+  rm -rf "$tmp"; mkdir -p "$tmp/sof-soundwire"
+  for f in "$UCM_SYS"/*; do [ "${f##*/}" = sof-soundwire ] || ln -s "$f" "$tmp/"; done
+  for f in "$UCM_SYS"/sof-soundwire/*; do ln -s "$f" "$tmp/sof-soundwire/"; done
+  [ -e "$UCM_SYS/sof-soundwire/tas2783.conf" ] || install -m644 "$DATA/tas2783.conf" "$tmp/sof-soundwire/tas2783.conf"
+  rm -rf "$UCM_OVL"; mv "$tmp" "$UCM_OVL"
+  mkdir -p "$(dirname "$UCM_ENV")"
+  echo "ALSA_CONFIG_UCM2=$UCM_OVL" > "$UCM_ENV"
+}
 
 case "${1:-status}" in
   on)
@@ -58,12 +88,23 @@ case "${1:-status}" in
     chk "LSP plugins present"              '[ -f "$HOME/.local/lib/x20-speaker-dsp/lv2/lsp-plugins.lv2/lsp-plugins-lv2.so" ]'
     chk "LSP plugins libraries resolve"    '! ldd "$HOME/.local/lib/x20-speaker-dsp/lv2/lsp-plugins.lv2/lsp-plugins-lv2.so" 2>/dev/null | grep -q "not found"'
     chk "PipeWire sees LV2_PATH"           'systemctl --user show pipewire -p Environment | grep -q x20-speaker-dsp'
+    chk "speaker driver loaded (spk:tas2783)" 'speaker_driver_ok'
+    ucm="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^ALSA_CONFIG_UCM2=//p')"
+    chk "speaker profile available"        '[ -f "$UCM_SYS/sof-soundwire/tas2783.conf" ] || [ -f "${ucm:-/nonexistent}/sof-soundwire/tas2783.conf" ]'
     chk "speaker sink exists"              'pw-cli ls Node 2>/dev/null | grep -q "amd_sdw.HiFi__Speaker__sink"'
     if [ -f "$CONF" ]; then chk "filter loaded" 'loaded'; else echo "  [--] DSP is off"; fi
     chk "EasyEffects not running"          '! pgrep -x easyeffects >/dev/null'
     if [ $ok = 0 ]; then
       echo "Recent PipeWire log:"
       journalctl --user -u pipewire -n 30 --no-pager 2>/dev/null | grep -iE 'error|fail|lv2|filter' || true
+    fi ;;
+  speaker-driver) speaker_driver_ok ;;
+  speaker-profile)
+    [ -f "$DATA/tas2783.conf" ] || { echo "speaker profile not installed (run install.sh)"; exit 1; }
+    speaker_profile || exit 1
+    if [ "${2:-}" = --apply ]; then
+      systemctl --user set-environment "ALSA_CONFIG_UCM2=$UCM_OVL"
+      restart
     fi ;;
   -h|--help|help) usage ;;
   *) usage; exit 1 ;;

@@ -5,10 +5,11 @@
 #   ./install.sh                 install and turn on the default preset (xtc)
 #   ./install.sh --preset wide   install and turn on another preset
 #   ./install.sh --no-activate   install files only
+#   ./install.sh --no-speaker-fix  don't add the speaker profile if the speakers are silent
 #   ./install.sh --force         skip the device check (unsupported hardware!)
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pinned LSP Plugins build from the official Arch Linux archive (LGPL-3.0, not bundled here).
@@ -21,14 +22,18 @@ LIB="$HOME/.local/lib/x20-speaker-dsp"
 BIN="$HOME/.local/bin"
 DROPIN_DIR="$HOME/.config/systemd/user/pipewire.service.d"
 DROPIN="$DROPIN_DIR/x20-speaker-dsp.conf"
+UNIT_DIR="$HOME/.config/systemd/user"
+UCM_UNIT="x20-speaker-ucm.service"
+FULL_FIX="https://github.com/hungarianhc/rog-ally-x20-steamos-speakers"
 
-PRESET="xtc"; ACTIVATE=1; FORCE=0
+PRESET="xtc"; ACTIVATE=1; FORCE=0; SPKFIX=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --preset) PRESET="${2:?--preset needs a name}"; shift ;;
     --no-activate) ACTIVATE=0 ;;
+    --no-speaker-fix) SPKFIX=0 ;;
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac; shift
 done
@@ -49,9 +54,8 @@ for d in /sys/bus/pci/devices/*; do
   [ "$(cat "$d/vendor" 2>/dev/null)" = "0x1022" ] && [ "$(cat "$d/device" 2>/dev/null)" = "0x15e2" ] || continue
   subsys="$(cat "$d/subsystem_vendor"):$(cat "$d/subsystem_device")"
 done
-amps="$(ls /sys/bus/soundwire/devices 2>/dev/null | grep -c '0102:0000' || true)"
-echo "    board: ${board:-?}  vendor: ${vendor:-?}  audio subsystem: ${subsys:-?}  TI amps: $amps"
-if [ "$board" != "RC74XA" ] || [ "$subsys" != "0x1043:0x1954" ] || [ "$amps" -lt 2 ]; then
+echo "    board: ${board:-?}  vendor: ${vendor:-?}  audio subsystem: ${subsys:-?}"
+if [ "$board" != "RC74XA" ] || [ "$subsys" != "0x1043:0x1954" ]; then
   if [ "$FORCE" = 1 ]; then
     warn "This is not an ROG Xbox Ally X20 (RC74XA). Continuing because of --force; the tuning is NOT made for this hardware."
   else
@@ -61,7 +65,7 @@ fi
 
 # ---------- 2. software check ----------
 say "Checking software"
-for c in pw-cli pw-dump wpctl systemctl curl sha256sum tar python3 ldd; do
+for c in pw-cli pw-dump wpctl systemctl curl sha256sum tar python3 ldd amixer; do
   command -v "$c" >/dev/null || die "missing command: $c"
 done
 pwv="$(pipewire --version 2>/dev/null | sed -n 's/.*libpipewire \([0-9.]*\).*/\1/p' | head -1)"
@@ -80,12 +84,40 @@ for o in objs:
     if p.get("media.class")=="Audio/Sink" and "amd_sdw" in n and "Speaker" in n:
         print(n); break'
 }
-# PipeWire may still be starting (right after login or a restart): wait up to 15 s.
-SINK=""
-for _ in $(seq 1 15); do SINK="$(find_sink)"; [ -n "$SINK" ] && break; sleep 1; done
-if [ -z "$SINK" ]; then
-  die "Built-in speaker output not found. Make sure the speakers work first — on SteamOS the X20 needs the speaker fix:
-      https://github.com/hungarianhc/rog-ally-x20-steamos-speakers"
+wait_sink() { SINK=""; for _ in $(seq 1 "$1"); do SINK="$(find_sink)"; [ -n "$SINK" ] && return 0; sleep 1; done; return 1; }
+
+# ---------- 3. speakers ----------
+# PipeWire may still be starting (right after login or a restart).
+say "Checking speakers"
+if wait_sink 10; then
+  echo "    speakers already working"
+elif [ "$SPKFIX" = 0 ]; then
+  die "Built-in speaker output not found (and --no-speaker-fix was given)."
+else
+  # Speakers silent. On SteamOS 3.10+ the kernel and amp firmware already support the X20;
+  # only the speaker profile (ALSA UCM tas2783.conf) is missing. Older SteamOS needs the full fix.
+  install -d "$DATA" "$BIN" "$UNIT_DIR"
+  install -m755 "$HERE/bin/x20-dsp" "$BIN/x20-dsp"
+  if ! "$BIN/x20-dsp" speaker-driver; then
+    die "The speaker driver isn't loaded (the sound card doesn't report the TAS2783 amps).
+      This SteamOS/kernel ($(uname -r)) doesn't support the X20 speakers out of the box.
+      Update SteamOS to 3.10 or newer, or use the full speaker fix (needs sudo + reboot):
+      $FULL_FIX"
+  fi
+  if [ -f /usr/share/alsa/ucm2/sof-soundwire/tas2783.conf ]; then
+    die "Speaker driver and profile are both present, but PipeWire shows no speaker output.
+      Try a reboot, then run ./install.sh again."
+  fi
+  say "Adding the X20 speaker profile (missing from this SteamOS version)"
+  install -m644 "$HERE/ucm/tas2783.conf" "$DATA/tas2783.conf"
+  install -m644 "$HERE/ucm/LICENSE.alsa-ucm-conf" "$DATA/LICENSE.alsa-ucm-conf"
+  install -m644 "$HERE/ucm/$UCM_UNIT" "$UNIT_DIR/$UCM_UNIT"
+  systemctl --user daemon-reload
+  systemctl --user enable "$UCM_UNIT" >/dev/null 2>&1
+  "$BIN/x20-dsp" speaker-profile --apply
+  wait_sink 15 || die "Speaker profile added, but the speaker output still doesn't show up.
+      Reboot and run ./install.sh again. If it stays silent, see $FULL_FIX"
+  echo "    speakers working"
 fi
 echo "    speaker sink: $SINK"
 
@@ -101,7 +133,7 @@ for f in "$HOME"/.config/pipewire/pipewire.conf.d/*.conf; do
   fi
 done
 
-# ---------- 3. LSP plugins ----------
+# ---------- 4. LSP plugins ----------
 if [ -f "$LIB/lv2/lsp-plugins.lv2/lsp-plugins-lv2.so" ] && [ "$(cat "$LIB/lsp.sha256" 2>/dev/null)" = "$LSP_SHA256" ]; then
   say "LSP Plugins already installed"
 else
@@ -128,7 +160,7 @@ if ldd "$LIB/lv2/lsp-plugins.lv2/lsp-plugins-lv2.so" | grep -q 'not found'; then
   die "LSP Plugins is missing system libraries on this SteamOS version"
 fi
 
-# ---------- 4. presets, command, PipeWire override ----------
+# ---------- 5. presets, command, PipeWire override ----------
 say "Installing presets and the x20-dsp command"
 mkdir -p "$DATA/presets" "$BIN" "$DROPIN_DIR"
 for f in "$HERE"/presets/*.conf; do
@@ -138,6 +170,11 @@ echo "$VERSION" > "$DATA/version"
 [ -f "$DATA/active" ] || echo "$PRESET" > "$DATA/active"
 install -m755 "$HERE/bin/x20-dsp" "$BIN/x20-dsp"
 install -m755 "$HERE/tools/measure-balance.sh" "$DATA/measure-balance.sh"
+if [ -f "$UNIT_DIR/$UCM_UNIT" ]; then   # keep an earlier-added speaker profile up to date
+  install -m644 "$HERE/ucm/tas2783.conf" "$DATA/tas2783.conf"
+  install -m644 "$HERE/ucm/$UCM_UNIT" "$UNIT_DIR/$UCM_UNIT"
+  "$BIN/x20-dsp" speaker-profile
+fi
 
 cat > "$DROPIN" <<EOF
 # x20-speaker-dsp: let PipeWire find the LSP plugins installed in your home folder.
@@ -149,7 +186,7 @@ systemctl --user daemon-reload
 
 case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not in your PATH; run $BIN/x20-dsp or add it to PATH." ;; esac
 
-# ---------- 5. activate ----------
+# ---------- 6. activate ----------
 if [ "$ACTIVATE" = 1 ]; then
   say "Turning on preset '$PRESET' (sound cuts out for ~2 seconds)"
   "$BIN/x20-dsp" on "$PRESET"

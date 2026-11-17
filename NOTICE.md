@@ -25,6 +25,7 @@ These were designed for the X20 and tuned by listening tests on the device:
 ## Third-party software
 
 - **LSP Plugins** 1.2.37 (LGPL-3.0). `install.sh` downloads it from the official Arch Linux archive and checks its SHA-256 and the Arch packager signature. It is not redistributed in this repository.
+- **alsa-ucm-conf** (BSD-3-Clause, © 2019 ALSA project). `ucm/tas2783.conf` is an unmodified copy of `ucm2/sof-soundwire/tas2783.conf` from upstream commit 182d0122 ("ucm2: sof-soundwire: Add tas2783 support"). The license text is in `ucm/LICENSE.alsa-ucm-conf`.
 - **speaker-tuning-to-easyeffects** (MIT, © 2026 Antoine Cellerier). Its code is not included; only configuration it helped generate is.
 
 All trademarks belong to their owners. This project is not affiliated with ASUS, Microsoft, Valve or Dolby.

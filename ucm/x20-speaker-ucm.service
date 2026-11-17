@@ -1,0 +1,12 @@
+# x20-speaker-dsp: keeps the X20 speaker profile in step with SteamOS updates.
+# Rebuilds ~/.local/share/x20-speaker-dsp/ucm2 at login, before PipeWire starts.
+[Unit]
+Description=ROG Xbox Ally X20 speaker profile (x20-speaker-dsp)
+Before=pipewire.service wireplumber.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/x20-dsp speaker-profile
+
+[Install]
+WantedBy=default.target
