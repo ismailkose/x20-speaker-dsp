@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# x20-dsp — turn the ROG Xbox Ally X20 speaker DSP on/off and switch presets.
+# Part of x20-speaker-dsp. Only the built-in speakers are processed;
+# headphones, HDMI, Bluetooth and USB audio bypass it automatically.
+set -u
+DATA="$HOME/.local/share/x20-speaker-dsp"
+PRESETS="$DATA/presets"
+STATE="$DATA/active"
+CONF="$HOME/.config/pipewire/pipewire.conf.d/90-x20-dsp.conf"
+NODE="effect_input.x20_dsp"
+
+usage() {
+  cat <<EOF
+usage: x20-dsp <command>
+  on [preset]     turn on (last used preset, or the one given)
+  off             turn off (stock speaker sound)
+  toggle          on <-> off
+  use <preset>    switch preset (turns on)
+  list            list presets (* = selected)
+  status          show state
+  doctor          check the installation
+EOF
+}
+current() { cat "$STATE" 2>/dev/null || echo xtc; }
+restart() { systemctl --user restart pipewire pipewire-pulse wireplumber; sleep 2; }
+loaded()  { pw-cli ls Node 2>/dev/null | grep -q "$NODE"; }
+
+case "${1:-status}" in
+  on)
+    p="${2:-$(current)}"
+    [ -f "$PRESETS/$p.conf" ] || { echo "unknown preset: $p (try: x20-dsp list)"; exit 1; }
+    mkdir -p "$(dirname "$CONF")"
+    cp "$PRESETS/$p.conf" "$CONF"; echo "$p" > "$STATE"; restart
+    if loaded; then echo "X20 DSP ON (preset: $p)"
+    else echo "Preset $p written, but the filter did NOT load. Run: x20-dsp doctor"; exit 1; fi ;;
+  use)
+    [ -n "${2:-}" ] || { echo "usage: x20-dsp use <preset>"; exit 1; }
+    exec "$0" on "$2" ;;
+  off)
+    rm -f "$CONF"; restart; echo "X20 DSP OFF (stock speaker sound)" ;;
+  toggle)
+    if [ -f "$CONF" ]; then exec "$0" off; else exec "$0" on; fi ;;
+  list)
+    for f in "$PRESETS"/*.conf; do
+      n="$(basename "$f" .conf)"; d="$(sed -n '2s/^# //p' "$f")"
+      if [ "$n" = "$(current)" ]; then printf '* %-16s %s\n' "$n" "$d"; else printf '  %-16s %s\n' "$n" "$d"; fi
+    done ;;
+  status)
+    if [ -f "$CONF" ]; then
+      if loaded; then echo "ON, preset: $(current), filter loaded"
+      else echo "ON, preset: $(current), but filter NOT loaded (run: x20-dsp doctor)"; fi
+    else echo "OFF"; fi ;;
+  doctor)
+    ok=1
+    chk() { if eval "$2"; then echo "  [ok] $1"; else echo "  [!!] $1"; ok=0; fi; }
+    echo "x20-speaker-dsp $(cat "$DATA/version" 2>/dev/null || echo '?')"
+    chk "device is RC74XA"                 '[ "$(cat /sys/class/dmi/id/board_name 2>/dev/null)" = RC74XA ]'
+    chk "LSP plugins present"              '[ -f "$HOME/.local/lib/x20-speaker-dsp/lv2/lsp-plugins.lv2/lsp-plugins-lv2.so" ]'
+    chk "LSP plugins libraries resolve"    '! ldd "$HOME/.local/lib/x20-speaker-dsp/lv2/lsp-plugins.lv2/lsp-plugins-lv2.so" 2>/dev/null | grep -q "not found"'
+    chk "PipeWire sees LV2_PATH"           'systemctl --user show pipewire -p Environment | grep -q x20-speaker-dsp'
+    chk "speaker sink exists"              'pw-cli ls Node 2>/dev/null | grep -q "amd_sdw.HiFi__Speaker__sink"'
+    if [ -f "$CONF" ]; then chk "filter loaded" 'loaded'; else echo "  [--] DSP is off"; fi
+    chk "EasyEffects not running"          '! pgrep -x easyeffects >/dev/null'
+    if [ $ok = 0 ]; then
+      echo "Recent PipeWire log:"
+      journalctl --user -u pipewire -n 30 --no-pager 2>/dev/null | grep -iE 'error|fail|lv2|filter' || true
+    fi ;;
+  -h|--help|help) usage ;;
+  *) usage; exit 1 ;;
+esac
